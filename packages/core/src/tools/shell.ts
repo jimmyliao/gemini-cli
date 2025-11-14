@@ -29,8 +29,10 @@ import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
+  ShellExecutionHandle,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
+import { getBackgroundTaskManager } from '../services/backgroundTaskManager.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import {
@@ -49,6 +51,8 @@ export interface ShellToolParams {
   command: string;
   description?: string;
   directory?: string;
+  run_in_background?: boolean;
+  timeout?: number;
 }
 
 export class ShellToolInvocation extends BaseToolInvocation<
@@ -137,6 +141,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         llmContent: 'Command was cancelled by user before it could start.',
         returnDisplay: 'Command cancelled by user.',
       };
+    }
+
+    // Handle background execution
+    if (this.params.run_in_background) {
+      return this.executeInBackground(signal, shellExecutionConfig);
     }
 
     const isWindows = os.platform() === 'win32';
@@ -334,6 +343,78 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const invocation = { params: { command } } as unknown as AnyToolInvocation;
     return isShellInvocationAllowlisted(invocation, allowedTools);
   }
+
+  /**
+   * Execute a command in the background and return immediately
+   *
+   * @param signal - Abort signal
+   * @param shellExecutionConfig - Shell execution configuration
+   * @returns Tool result with shell_id and pid
+   */
+  private async executeInBackground(
+    signal: AbortSignal,
+    shellExecutionConfig?: ShellExecutionConfig,
+  ): Promise<ToolResult> {
+    if (signal.aborted) {
+      return {
+        llmContent: 'Command was cancelled by user before it could start.',
+        returnDisplay: 'Command cancelled by user.',
+      };
+    }
+
+    const strippedCommand = stripShellWrapper(this.params.command);
+    const cwd = this.params.directory || this.config.getTargetDir();
+
+    try {
+      // Execute the command without waiting for completion
+      const { result: resultPromise, pid } =
+        await ShellExecutionService.execute(
+          strippedCommand,
+          cwd,
+          (event: ShellOutputEvent) => {
+            // Buffer output in background task manager
+            const taskManager = getBackgroundTaskManager();
+            const tasks = taskManager.listTasks();
+            const currentTask = tasks.find((t) => t.pid === pid);
+
+            if (currentTask && event.type === 'data') {
+              const outputText =
+                typeof event.chunk === 'string' ? event.chunk : '';
+              const lines = outputText.split('\n');
+              for (const line of lines) {
+                if (line.trim()) {
+                  taskManager.appendOutput(currentTask.id, line);
+                }
+              }
+            }
+          },
+          signal,
+          true, // useNodePty
+          shellExecutionConfig || {},
+        );
+
+      // Register task with background task manager
+      const taskManager = getBackgroundTaskManager();
+      const handle: ShellExecutionHandle = {
+        pid,
+        result: resultPromise,
+      };
+      const task = taskManager.registerTask(strippedCommand, cwd, handle);
+
+      const llmContent = `Command started in background with shell_id: ${task.id}, pid: ${pid}. Use BashOutput tool to retrieve output later with shell_id: ${task.id}.`;
+
+      return {
+        llmContent,
+        returnDisplay: `Background execution started (ID: ${task.id}, PID: ${pid})`,
+      };
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      return {
+        llmContent: `Failed to start background command: ${errorMessage}`,
+        returnDisplay: `Error: ${errorMessage}`,
+      };
+    }
+  }
 }
 
 function getShellToolDescription(): string {
@@ -402,6 +483,17 @@ export class ShellTool extends BaseDeclarativeTool<
             type: 'string',
             description:
               '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
+          },
+          run_in_background: {
+            type: 'boolean',
+            description:
+              '(OPTIONAL) Set to true to run this command in the background without waiting for completion. Returns immediately with shell_id and pid. Use BashOutput tool to retrieve output later.',
+            default: false,
+          },
+          timeout: {
+            type: 'number',
+            description:
+              '(OPTIONAL) Timeout in milliseconds for command execution (max 600000). Only applies when run_in_background is false.',
           },
         },
         required: ['command'],

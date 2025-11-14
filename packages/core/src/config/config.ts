@@ -25,6 +25,8 @@ import { GlobTool } from '../tools/glob.js';
 import { EditTool } from '../tools/edit.js';
 import { SmartEditTool } from '../tools/smart-edit.js';
 import { ShellTool } from '../tools/shell.js';
+import { BashOutputTool } from '../tools/bash-output.js';
+import { KillShellTool } from '../tools/kill-shell.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
@@ -1181,6 +1183,8 @@ export class Config {
     registerCoreTool(WebFetchTool, this);
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
+    registerCoreTool(BashOutputTool);
+    registerCoreTool(KillShellTool);
     registerCoreTool(MemoryTool);
     registerCoreTool(WebSearchTool, this);
     if (this.getUseWriteTodos()) {
